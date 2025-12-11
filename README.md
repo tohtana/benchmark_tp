@@ -25,27 +25,22 @@ python -c "import transformers; print(f'Transformers: {transformers.__version__}
 
 ## Quick Start
 
-### DeepSpeed AutoTP (4 GPUs)
+### Comparing Implementations (Matching Settings)
+
+Both implementations support DP+TP 2D parallelism. Here's how to run them with equivalent settings:
 
 ```bash
-torchrun --nproc_per_node=4 benchmark.py \
+# AutoTP: 8 GPUs with 2 DP x 4 TP
+torchrun --nproc_per_node=8 benchmark.py \
     --impl autotp \
     --model_name Qwen/Qwen3-32B \
+    --dp_size 2 \
     --tp_size 4 \
     --batch_size 1 \
     --seq_length 2048 \
     --num_training_steps 100
-```
 
-Or use the convenience script:
-
-```bash
-TP_SIZE=4 ./scripts/run_autotp.sh
-```
-
-### FSDP + DTensor (8 GPUs: 2 DP x 4 TP)
-
-```bash
+# FSDP+DTensor: 8 GPUs with 2 DP x 4 TP
 torchrun --nproc_per_node=8 benchmark.py \
     --impl fsdp_dtensor \
     --model_name Qwen/Qwen3-32B \
@@ -56,10 +51,29 @@ torchrun --nproc_per_node=8 benchmark.py \
     --num_training_steps 100
 ```
 
-Or use the convenience script:
+Or use the convenience scripts:
 
 ```bash
+# AutoTP
+DP_SIZE=2 TP_SIZE=4 ./scripts/run_autotp.sh
+
+# FSDP+DTensor
 DP_SIZE=2 TP_SIZE=4 ./scripts/run_fsdp_dtensor.sh
+```
+
+### TP-Only Mode (No Data Parallelism)
+
+```bash
+# AutoTP: 4 GPUs, TP only
+torchrun --nproc_per_node=4 benchmark.py \
+    --impl autotp \
+    --tp_size 4
+
+# FSDP+DTensor: 4 GPUs, TP only
+torchrun --nproc_per_node=4 benchmark.py \
+    --impl fsdp_dtensor \
+    --dp_size 1 \
+    --tp_size 4
 ```
 
 ## Configuration Options
@@ -78,8 +92,10 @@ DP_SIZE=2 TP_SIZE=4 ./scripts/run_fsdp_dtensor.sh
 |----------|---------|-------------|
 | `--impl` | `autotp` | TP implementation (`autotp` or `fsdp_dtensor`) |
 | `--tp_size` | auto | Tensor parallel degree |
-| `--dp_size` | `1` | Data parallel degree (FSDP+DTensor only) |
+| `--dp_size` | `1` | Data parallel degree (both implementations) |
 | `--zero_stage` | `1` | DeepSpeed ZeRO stage (AutoTP only, 0-2) |
+
+Both implementations require `dp_size * tp_size == world_size`.
 
 ### Training Configuration
 
@@ -216,9 +232,9 @@ from . import llama  # This registers the model via @register_model decorator
 torchrun --nproc_per_node=4 benchmark.py --model_name meta-llama/Llama-3-8B ...
 ```
 
-## Understanding the 2D Device Mesh (FSDP+DTensor)
+## Understanding the 2D Device Mesh
 
-When using `--impl fsdp_dtensor`, the GPUs are organized in a 2D mesh:
+Both implementations support 2D parallelism (DP+TP). When using `dp_size > 1`, the GPUs are organized in a 2D mesh:
 
 ```
 For 8 GPUs with dp_size=2, tp_size=4:
@@ -235,9 +251,18 @@ For 8 GPUs with dp_size=2, tp_size=4:
   - Each group processes the same data
 
 - DP groups (same column): {0,4}, {1,5}, {2,6}, {3,7}
-  - FSDP shards optimizer states across these groups
+  - Optimizer states/gradients are reduced across these groups
   - Each group processes different data batches
 ```
+
+### Implementation Differences
+
+| Aspect | AutoTP | FSDP+DTensor |
+|--------|--------|--------------|
+| TP mechanism | `deepspeed.tp_model_init()` | DTensor `parallelize_module()` |
+| DP mechanism | DeepSpeed engine with MPU | FSDP2 `fully_shard()` |
+| Optimizer | DeepSpeed ZeRO (stage 0-2) | PyTorch AdamW |
+| Memory optimization | ZeRO sharding | FSDP sharding |
 
 ## Architecture
 
