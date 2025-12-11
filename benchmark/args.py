@@ -42,7 +42,19 @@ def get_args():
         type=int,
         default=1,
         choices=[0, 1, 2],
-        help="DeepSpeed ZeRO stage (only used for autotp)",
+        help="DeepSpeed ZeRO stage (only used for autotp, ZeRO-3 not supported with AutoTP)",
+    )
+    parser.add_argument(
+        "--use_vocab_parallel",
+        action="store_true",
+        default=True,
+        help="Enable vocabulary-parallel embedding and loss computation (AutoTP only)",
+    )
+    parser.add_argument(
+        "--no_vocab_parallel",
+        dest="use_vocab_parallel",
+        action="store_false",
+        help="Disable vocabulary-parallel embedding (AutoTP only)",
     )
 
     # Training configuration

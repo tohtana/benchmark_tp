@@ -8,6 +8,10 @@ import torch.nn as nn
 
 from ..models.base import BaseModelBuilder
 from .base import BaseTPStrategy
+from .vocab_parallel import (
+    VocabParallelEmbedding,
+    vocab_parallel_causal_cross_entropy,
+)
 
 
 class AutoTPStrategy(BaseTPStrategy):
@@ -29,11 +33,13 @@ class AutoTPStrategy(BaseTPStrategy):
     - DP groups: {0,4}, {1,5}, {2,6}, {3,7}
     """
 
-    def __init__(self, tp_size: Optional[int] = None, dp_size: int = 1):
+    def __init__(self, tp_size: Optional[int] = None, dp_size: int = 1, use_vocab_parallel: bool = True):
         super().__init__(tp_size, dp_size)
         self.engine = None
         self.tp_group = None
         self.dp_group = None
+        self.use_vocab_parallel = use_vocab_parallel
+        self._model_builder = None
 
     @property
     def strategy_name(self) -> str:
@@ -122,6 +128,7 @@ class AutoTPStrategy(BaseTPStrategy):
         self.device = device
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self._model_builder = model_builder
 
         # Determine TP size - if not specified, use world_size / dp_size
         if self.tp_size is None:
@@ -173,6 +180,12 @@ class AutoTPStrategy(BaseTPStrategy):
             dtype=dtype,
             tp_group=self.tp_group,
         )
+
+        # Apply vocabulary-parallel embedding for proper parallel loss computation
+        # DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension,
+        # so we replace them with VocabParallelEmbedding for correct loss computation
+        if self.use_vocab_parallel and self.tp_group is not None:
+            self._apply_vocab_parallel_embedding(model, device, dtype)
 
         # Get all parameters
         params = list(model.parameters())
@@ -238,16 +251,112 @@ class AutoTPStrategy(BaseTPStrategy):
             print(f"[AutoTP] DeepSpeed engine created with ZeRO-{zero_stage}")
             if self.dp_size > 1:
                 print(f"[AutoTP] 2D parallelism: {self.dp_size} DP x {self.tp_size} TP")
+            if self.use_vocab_parallel:
+                print(f"[AutoTP] Vocabulary parallelism enabled")
+
+    def _apply_vocab_parallel_embedding(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        """
+        Apply vocabulary-parallel embedding to the model.
+
+        DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension,
+        so we replace them with VocabParallelEmbedding for correct loss computation.
+
+        Args:
+            model: The model to modify
+            device: Target device
+            dtype: Target dtype
+        """
+        original_embedding = self._model_builder.get_embedding_module(model)
+        if original_embedding is None:
+            if self.rank == 0:
+                print("[AutoTP] Warning: Could not find embedding module, skipping vocab parallel")
+            return
+
+        if self.rank == 0:
+            print(
+                f"[AutoTP] Replacing embedding with VocabParallelEmbedding "
+                f"(vocab_size={original_embedding.num_embeddings}, tp_size={self.tp_size})"
+            )
+
+        # Create VocabParallelEmbedding
+        vocab_parallel_embedding = VocabParallelEmbedding(
+            num_embeddings=original_embedding.num_embeddings,
+            embedding_dim=original_embedding.embedding_dim,
+            padding_idx=original_embedding.padding_idx,
+            tp_group=self.tp_group,
+            dtype=dtype,
+            device=device,
+        )
+
+        # Copy the appropriate partition of weights from original embedding
+        with torch.no_grad():
+            start_idx = vocab_parallel_embedding.vocab_start_index
+            end_idx = vocab_parallel_embedding.vocab_end_index
+            vocab_parallel_embedding.weight.data.copy_(
+                original_embedding.weight.data[start_idx:end_idx]
+            )
+
+        # Replace the embedding in the model
+        self._model_builder.replace_embedding_module(model, vocab_parallel_embedding)
+
+        # Handle lm_head based on weight tying configuration
+        lm_head = self._model_builder.get_lm_head(model)
+        if lm_head is not None:
+            tie_word_embeddings = getattr(model.config, "tie_word_embeddings", True)
+            if tie_word_embeddings:
+                # Tied weights: lm_head shares weight with embedding
+                lm_head.weight = vocab_parallel_embedding.weight
+                if self.rank == 0:
+                    print(f"[AutoTP] lm_head weight tied to VocabParallelEmbedding")
+            else:
+                # Untied weights: lm_head needs its own partitioned weight
+                original_lm_head_weight = lm_head.weight.data.clone()
+                lm_head.weight = nn.Parameter(
+                    original_lm_head_weight[start_idx:end_idx, :].to(device)
+                )
+                if self.rank == 0:
+                    print(f"[AutoTP] lm_head weight sharded independently (untied)")
+
+        if self.rank == 0:
+            print(
+                f"[AutoTP] VocabParallelEmbedding applied: vocab_range=[{start_idx}, {end_idx}), "
+                f"partition_size={end_idx - start_idx}"
+            )
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Run forward pass with AutoTP model."""
-        outputs = self.engine(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-            use_cache=False,
-        )
-        return outputs.loss
+        # When using vocab parallel, we need to compute loss manually
+        # because the model's built-in loss uses the full vocabulary
+        if self.use_vocab_parallel and self.tp_group is not None:
+            outputs = self.engine(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                use_cache=False,
+            )
+            # Compute vocab-parallel loss
+            loss = vocab_parallel_causal_cross_entropy(
+                outputs.logits,
+                batch["labels"],
+                self.tp_group,
+                self.tp_rank,
+                self.tp_size,
+                ignore_index=-100,
+            )
+            return loss
+        else:
+            # Use model's built-in loss computation
+            outputs = self.engine(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+                use_cache=False,
+            )
+            return outputs.loss
 
     def backward(self, loss: torch.Tensor) -> None:
         """Run backward pass through DeepSpeed engine."""

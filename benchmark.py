@@ -159,6 +159,7 @@ def main():
         print(f"World size: {world_size}")
         print(f"TP size: {args.tp_size or 'auto'}")
         print(f"DP size: {args.dp_size}")
+        print(f"Vocab parallel: {args.use_vocab_parallel}")
         print(f"Batch size: {args.batch_size}")
         print(f"Sequence length: {args.seq_length}")
         print(f"Training steps: {args.num_training_steps}")
@@ -196,6 +197,7 @@ def main():
         impl=args.impl,
         tp_size=args.tp_size,
         dp_size=args.dp_size,
+        use_vocab_parallel=args.use_vocab_parallel,
     )
 
     # Setup strategy (creates model and optimizer)
@@ -236,6 +238,7 @@ def main():
         "impl": args.impl,
         "tp_size": strategy.tp_size,
         "dp_size": strategy.dp_size,
+        "use_vocab_parallel": args.use_vocab_parallel,
         "batch_size": args.batch_size,
         "seq_length": args.seq_length,
         "learning_rate": args.learning_rate,

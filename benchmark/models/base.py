@@ -123,3 +123,14 @@ class BaseModelBuilder(ABC):
         if hasattr(model, "lm_head"):
             return model.lm_head
         raise AttributeError(f"Model {type(model)} does not have lm_head attribute")
+
+    @abstractmethod
+    def replace_embedding_module(self, model: nn.Module, new_embedding: nn.Module) -> None:
+        """
+        Replace the embedding module in the model with a new one.
+
+        Args:
+            model: The model whose embedding should be replaced
+            new_embedding: The new embedding module (e.g., VocabParallelEmbedding)
+        """
+        pass

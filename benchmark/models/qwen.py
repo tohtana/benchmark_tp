@@ -163,3 +163,21 @@ class QwenModelBuilder(BaseModelBuilder):
             f"Cannot find embedding module in model {type(model)}. "
             f"Expected model.model.embed_tokens attribute."
         )
+
+    def replace_embedding_module(self, model: nn.Module, new_embedding: nn.Module) -> None:
+        """
+        Replace the embedding module in Qwen model.
+
+        Args:
+            model: The Qwen model whose embedding should be replaced
+            new_embedding: The new embedding module (e.g., VocabParallelEmbedding)
+        """
+        # Standard Qwen structure uses model.model.embed_tokens
+        if hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+            model.model.embed_tokens = new_embedding
+            return
+
+        raise AttributeError(
+            f"Cannot find embedding module to replace in model {type(model)}. "
+            f"Expected model.model.embed_tokens attribute."
+        )

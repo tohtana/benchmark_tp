@@ -4,7 +4,7 @@ Benchmark and compare tensor parallelism implementations for large language mode
 
 ## Supported Implementations
 
-1. **DeepSpeed AutoTP** - Uses DeepSpeed's automatic tensor parallelism via `deepspeed.tp_model_init()`
+1. **DeepSpeed AutoTP** - Uses DeepSpeed's automatic tensor parallelism via `deepspeed.tp_model_init()` with vocabulary-parallel embeddings
 2. **FSDP2 + DTensor** - Uses PyTorch's 2D device mesh with FSDP2 (`fully_shard`) for data parallelism and DTensor for tensor parallelism
 
 ## Installation
@@ -94,6 +94,8 @@ torchrun --nproc_per_node=4 benchmark.py \
 | `--tp_size` | auto | Tensor parallel degree |
 | `--dp_size` | `1` | Data parallel degree (both implementations) |
 | `--zero_stage` | `1` | DeepSpeed ZeRO stage (AutoTP only, 0-2) |
+| `--use_vocab_parallel` | `true` | Enable vocabulary-parallel embeddings (AutoTP only) |
+| `--no_vocab_parallel` | - | Disable vocabulary-parallel embeddings (AutoTP only) |
 
 Both implementations require `dp_size * tp_size == world_size`.
 
@@ -218,6 +220,10 @@ class LlamaModelBuilder(BaseModelBuilder):
     def get_embedding_module(self, model):
         """Return the embedding module."""
         return model.model.embed_tokens
+
+    def replace_embedding_module(self, model, new_embedding):
+        """Replace embedding with VocabParallelEmbedding."""
+        model.model.embed_tokens = new_embedding
 ```
 
 3. Import the new model in `benchmark/models/__init__.py`:
@@ -263,6 +269,27 @@ For 8 GPUs with dp_size=2, tp_size=4:
 | DP mechanism | DeepSpeed engine with MPU | FSDP2 `fully_shard()` |
 | Optimizer | DeepSpeed ZeRO (stage 0-2) | PyTorch AdamW |
 | Memory optimization | ZeRO sharding | FSDP sharding |
+| Vocab parallelism | VocabParallelEmbedding | Not implemented |
+
+## Vocabulary Parallelism
+
+When `--use_vocab_parallel` is enabled (default for AutoTP), the implementation:
+
+1. **Partitions embeddings** - Each TP rank stores `vocab_size / tp_size` embeddings
+2. **Shards lm_head** - Output projection weights are partitioned to match
+3. **Uses vocab-parallel loss** - Cross-entropy computed correctly over partitioned logits
+
+This is important because DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension by default. Without vocab parallelism, loss computation would be incorrect.
+
+```
+Example: vocab_size=151936, tp_size=4
+  Rank 0: vocab [0, 37984)      - 37,984 embeddings
+  Rank 1: vocab [37984, 75968)  - 37,984 embeddings
+  Rank 2: vocab [75968, 113952) - 37,984 embeddings
+  Rank 3: vocab [113952, 151936) - 37,984 embeddings
+```
+
+The `VocabParallelEmbedding` uses all-reduce to combine embedding outputs from all ranks, and `vocab_parallel_causal_cross_entropy` computes loss correctly when logits are split across ranks.
 
 ## Architecture
 
