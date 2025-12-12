@@ -158,7 +158,8 @@ class AutoTPStrategy(BaseTPStrategy):
         # Enable AutoTP instrumentation BEFORE model creation
         set_autotp_mode(training=True)
 
-        # Create model
+        # Create model on actual device with proper initialization (same as FSDP+DTensor)
+        # DeepSpeed AutoTP will then shard the properly-initialized weights
         model = model_builder.create_model(
             device=device,
             dtype=dtype,
@@ -223,7 +224,11 @@ class AutoTPStrategy(BaseTPStrategy):
 
         # Add precision config
         if dtype == torch.bfloat16:
-            ds_config["bf16"] = {"enabled": True}
+            ds_config["bf16"] = {
+                "enabled": True,
+                "bf16_master_weights_and_grads": True,
+                "bf16_optimizer_states": True,
+            }
         elif dtype == torch.float16:
             ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
 
