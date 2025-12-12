@@ -1,5 +1,6 @@
 """FSDP + DTensor 2D mesh tensor parallelism strategy."""
 
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -32,6 +33,8 @@ class FSDPDTensorStrategy(BaseTPStrategy):
         self.tp_mesh = None
         self.dp_mesh = None
         self.tp_group = None
+        self.use_autocast = False
+        self.autocast_dtype = None
 
     @property
     def strategy_name(self) -> str:
@@ -153,14 +156,28 @@ class FSDPDTensorStrategy(BaseTPStrategy):
             num_params = sum(p.numel() for p in model.parameters())
             print(f"[FSDP2+DTensor] Model initialized with {num_params:,} parameters")
 
+        # Configure autocast if enabled
+        self.use_autocast = config.get("autocast", False)
+        if self.use_autocast:
+            self.autocast_dtype = dtype
+            if self.rank == 0:
+                dtype_name = "bfloat16" if dtype == torch.bfloat16 else "float16"
+                print(f"[FSDP2+DTensor] torch.autocast enabled with dtype={dtype_name}")
+
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Run forward pass with FSDP2+DTensor model."""
-        outputs = self.model(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-            use_cache=False,
+        autocast_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.autocast_dtype)
+            if self.use_autocast
+            else nullcontext()
         )
+        with autocast_ctx:
+            outputs = self.model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+                use_cache=False,
+            )
         return outputs.loss
 
     def backward(self, loss: torch.Tensor) -> None:

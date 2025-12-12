@@ -173,6 +173,7 @@ def main():
         print(f"Warmup steps: {args.warmup_steps}")
         print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
         print(f"Data type: {args.dtype}")
+        print(f"Autocast: {args.autocast}")
         print(f"Profiling: {args.profile}")
         print(f"=" * 60)
 
@@ -219,6 +220,7 @@ def main():
         "activation_checkpointing": args.activation_checkpointing,
         "num_layers": args.num_layers,
         "attn_impl": args.attn_impl,
+        "autocast": args.autocast,
     }
 
     if rank == 0:
@@ -251,6 +253,7 @@ def main():
         "seq_length": args.seq_length,
         "learning_rate": args.learning_rate,
         "dtype": args.dtype,
+        "autocast": args.autocast,
         "num_training_steps": args.num_training_steps,
         "warmup_steps": args.warmup_steps,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,

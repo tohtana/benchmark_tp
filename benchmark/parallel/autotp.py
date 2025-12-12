@@ -232,6 +232,17 @@ class AutoTPStrategy(BaseTPStrategy):
         elif dtype == torch.float16:
             ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
 
+        # Add torch_autocast config if enabled
+        # DeepSpeed requires using its configuration instead of torch.autocast() context manager
+        if config.get("autocast", False):
+            autocast_dtype = "bfloat16" if dtype == torch.bfloat16 else "float16"
+            ds_config["torch_autocast"] = {
+                "enabled": True,
+                "dtype": autocast_dtype,
+            }
+            if self.rank == 0:
+                print(f"[AutoTP] torch_autocast enabled with dtype={autocast_dtype}")
+
         # Create optimizer
         learning_rate = config.get("learning_rate", 1e-5)
         weight_decay = config.get("weight_decay", 0.01)

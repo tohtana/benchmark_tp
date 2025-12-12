@@ -114,6 +114,11 @@ def get_args():
         default="bfloat16",
         help="Training data type",
     )
+    parser.add_argument(
+        "--autocast",
+        action="store_true",
+        help="Enable torch.autocast for mixed precision training (uses dtype for autocast dtype)",
+    )
 
     # Benchmarking configuration
     parser.add_argument(

@@ -116,6 +116,7 @@ Both implementations require `dp_size * tp_size == world_size`.
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--dtype` | `bfloat16` | Training dtype (`bfloat16`, `float16`, `float32`) |
+| `--autocast` | `false` | Enable torch.autocast for mixed precision (uses `--dtype`) |
 | `--activation_checkpointing` | `false` | Enable activation checkpointing |
 
 ### Benchmarking Configuration
@@ -140,6 +141,7 @@ Results are saved as JSON files in `{output_dir}/results_{impl}_tp{tp_size}_dp{d
     "dp_size": 1,
     "batch_size": 1,
     "seq_length": 2048,
+    "autocast": false,
     ...
   },
   "steps": [
@@ -270,6 +272,7 @@ For 8 GPUs with dp_size=2, tp_size=4:
 | Optimizer | DeepSpeed ZeRO (stage 0-2) | PyTorch AdamW |
 | Memory optimization | ZeRO sharding | FSDP sharding |
 | Vocab parallelism | VocabParallelEmbedding | Not implemented |
+| Autocast | DeepSpeed `torch_autocast` config | `torch.autocast()` context |
 
 ## Vocabulary Parallelism
 
