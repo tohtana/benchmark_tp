@@ -156,4 +156,23 @@ def get_args():
         help="Attention implementation",
     )
 
+    # Profiling configuration
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable PyTorch profiler for performance analysis",
+    )
+    parser.add_argument(
+        "--profile_dir",
+        type=str,
+        default=None,
+        help="Directory to save profiling traces (default: {output_dir}/profiles)",
+    )
+    parser.add_argument(
+        "--profile_steps",
+        type=int,
+        default=3,
+        help="Number of steps to actively profile after warmup",
+    )
+
     return parser.parse_args()

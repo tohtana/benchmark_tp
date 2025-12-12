@@ -16,6 +16,7 @@ Usage:
 
 import os
 import time
+from contextlib import nullcontext
 
 import torch
 
@@ -36,6 +37,7 @@ def training_loop(
     metrics_collector: MetricsCollector,
     gradient_accumulation_steps: int = 1,
     rank: int = 0,
+    profiler=None,
 ):
     """
     Unified training loop for both TP implementations.
@@ -49,6 +51,7 @@ def training_loop(
         metrics_collector: Metrics collector instance
         gradient_accumulation_steps: Gradient accumulation steps
         rank: Process rank
+        profiler: Optional PyTorch profiler instance
     """
     data_iterator = iter(dataloader)
     device = strategy.device
@@ -140,6 +143,10 @@ def training_loop(
                 f"Mem: {mem_allocated:.1f}GB (peak: {mem_peak:.1f}GB)"
             )
 
+        # Step the profiler
+        if profiler is not None:
+            profiler.step()
+
     return metrics_collector
 
 
@@ -166,6 +173,7 @@ def main():
         print(f"Warmup steps: {args.warmup_steps}")
         print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
         print(f"Data type: {args.dtype}")
+        print(f"Profiling: {args.profile}")
         print(f"=" * 60)
 
     # Set random seed
@@ -253,21 +261,53 @@ def main():
     # Reset peak memory before training
     torch.cuda.reset_peak_memory_stats()
 
+    # Set up profiling
+    profiler_context = nullcontext()
+    if args.profile:
+        profile_dir = args.profile_dir or os.path.join(args.output_dir, "profiles")
+        profile_subdir = os.path.join(
+            profile_dir,
+            f"{args.impl}_tp{strategy.tp_size}_dp{strategy.dp_size}_rank{rank}",
+        )
+        os.makedirs(profile_subdir, exist_ok=True)
+
+        if rank == 0:
+            print(f"Profiling enabled, traces will be saved to: {profile_dir}")
+
+        profiler_context = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=0,
+                warmup=args.warmup_steps,
+                active=args.profile_steps,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_subdir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+
     if rank == 0:
         print(f"\nStarting training loop...")
         print()
 
     # Run training loop
-    training_loop(
-        strategy=strategy,
-        dataloader=dataloader,
-        num_training_steps=args.num_training_steps,
-        warmup_steps=args.warmup_steps,
-        log_interval=args.log_interval,
-        metrics_collector=metrics_collector,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        rank=rank,
-    )
+    with profiler_context as profiler:
+        training_loop(
+            strategy=strategy,
+            dataloader=dataloader,
+            num_training_steps=args.num_training_steps,
+            warmup_steps=args.warmup_steps,
+            log_interval=args.log_interval,
+            metrics_collector=metrics_collector,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            rank=rank,
+            profiler=profiler,
+        )
 
     # Print and save results
     if rank == 0:
