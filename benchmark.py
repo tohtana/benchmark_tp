@@ -177,8 +177,10 @@ def main():
         print(f"Profiling: {args.profile}")
         print(f"=" * 60)
 
-    # Set random seed
-    torch.manual_seed(args.seed + rank)
+    # Set random seed for model initialization
+    # All ranks must use the SAME seed so TP sharding gets consistent weight slices
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
 
     # Get dtype
     dtype_map = {
@@ -234,11 +236,15 @@ def main():
         print(f"Effective DP size: {strategy.dp_size}")
 
     # Create dataloader
+    # Use DP rank for data seed so TP ranks in same DP group see same data,
+    # while different DP groups see different data
+    dp_rank = getattr(strategy, 'dp_rank', 0) if hasattr(strategy, 'dp_rank') else 0
+    data_seed = args.seed + dp_rank
     dataloader = create_dataloader(
         vocab_size=model_config.vocab_size,
         seq_length=args.seq_length,
         batch_size=args.batch_size,
-        seed=args.seed,
+        seed=data_seed,
     )
 
     # Create metrics collector

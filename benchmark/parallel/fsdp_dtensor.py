@@ -64,6 +64,10 @@ class FSDPDTensorStrategy(BaseTPStrategy):
         if self.tp_size is None:
             self.tp_size = self.world_size // self.dp_size
 
+        # Calculate TP and DP rank (same layout as AutoTP)
+        self.tp_rank = self.rank % self.tp_size
+        self.dp_rank = self.rank // self.tp_size
+
         # Validate configuration
         if self.dp_size * self.tp_size != self.world_size:
             raise ValueError(
