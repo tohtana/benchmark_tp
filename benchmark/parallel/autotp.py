@@ -199,11 +199,10 @@ class AutoTPStrategy(BaseTPStrategy):
         gradient_accumulation_steps = config.get("gradient_accumulation_steps", 1)
 
         # train_batch_size calculation:
-        # - When dp_size > 1 with MPU: DeepSpeed uses dp_size from MPU for batch calculation
-        # - When dp_size == 1 (TP only): DeepSpeed expects world_size (all TP ranks process same batch)
-        # DeepSpeed always validates: train_batch = micro_batch * grad_acc * world_size
-        # but with MPU, it uses mpu.get_data_parallel_world_size() instead
-        effective_dp = self.dp_size if self.dp_size > 1 else self.world_size
+        # - When MPU is provided (tp_size > 1): DeepSpeed uses mpu.get_data_parallel_world_size()
+        # - When MPU is not provided: DeepSpeed uses world_size
+        # This must match the condition for passing MPU to deepspeed.initialize()
+        effective_dp = self.dp_size if self.tp_size > 1 else self.world_size
         ds_config = {
             "train_batch_size": batch_size * effective_dp * gradient_accumulation_steps,
             "train_micro_batch_size_per_gpu": batch_size,
@@ -251,12 +250,13 @@ class AutoTPStrategy(BaseTPStrategy):
         )
 
         # Initialize DeepSpeed engine
-        # Pass the DP group so DeepSpeed does gradient all-reduce only across DP ranks
+        # Pass the MPU so DeepSpeed knows the parallelism topology and does gradient
+        # all-reduce only across DP ranks (not across TP ranks)
         self.engine, self.optimizer, _, _ = deepspeed.initialize(
             model=model,
             optimizer=optimizer,
             config=ds_config,
-            mpu=self._create_mpu() if self.dp_size > 1 else None,
+            mpu=self._create_mpu() if self.tp_size > 1 else None,
         )
 
         self.model = self.engine.module

@@ -156,7 +156,7 @@ def get_args():
     parser.add_argument(
         "--attn_impl",
         type=str,
-        default="sdpa",
+        default="flash_attention_2",
         choices=["sdpa", "flash_attention_2", "eager"],
         help="Attention implementation",
     )
