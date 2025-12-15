@@ -7,6 +7,107 @@ Benchmark and compare tensor parallelism implementations for large language mode
 1. **DeepSpeed AutoTP** - Uses DeepSpeed's automatic tensor parallelism via `deepspeed.tp_model_init()` with vocabulary-parallel embeddings
 2. **FSDP2 + DTensor** - Uses PyTorch's 2D device mesh with FSDP2 (`fully_shard`) for data parallelism and DTensor for tensor parallelism
 
+## Benchmark Comparison with TorchTitan
+
+**Versions tested**: PyTorch 2.9.0, DeepSpeed 0.18.3, TorchTitan v0.2.0
+
+### Commands
+
+```bash
+# DeepSpeed AutoTP
+torchrun --nproc_per_node=8 benchmark.py \
+    --impl autotp \
+    --tp_size 8 \
+    --model_name Qwen/Qwen3-32B \
+    --batch_size 1 \
+    --seq_length 2048 \
+    --dtype bfloat16 \
+    --autocast \
+    --attn_impl flash_attention_2 \
+    --activation_checkpointing \
+    --num_training_steps 100 \
+    --warmup_steps 5 \
+    --log_interval 10
+
+# FSDP + DTensor
+torchrun --nproc_per_node=8 benchmark.py \
+    --impl fsdp_dtensor \
+    --tp_size 8 \
+    --dp_size 1 \
+    --model_name Qwen/Qwen3-32B \
+    --batch_size 1 \
+    --seq_length 2048 \
+    --dtype bfloat16 \
+    --autocast \
+    --attn_impl flash_attention_2 \
+    --activation_checkpointing \
+    --num_training_steps 100 \
+    --warmup_steps 5 \
+    --log_interval 10
+
+# TorchTitan (run from torchtitan directory)
+# First, download the tokenizer:
+python torchtitan/datasets/download_tokenizer.py --repo_id Qwen/Qwen3-32B --tokenizer_path /tmp/qwen3_assets/Qwen3-32B
+
+# Then run the benchmark:
+cd /path/to/torchtitan
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
+torchrun --nproc_per_node=8 \
+    --rdzv_backend c10d \
+    --rdzv_endpoint="localhost:0" \
+    -m torchtitan.train \
+    --job.config_file /path/to/qwen3_32b_benchmark.toml
+```
+
+TorchTitan config (`qwen3_32b_benchmark.toml`):
+```toml
+[job]
+dump_folder = "/tmp/torchtitan_outputs"
+
+[metrics]
+log_freq = 10
+
+[model]
+name = "qwen3"
+flavor = "32B"
+hf_assets_path = "/tmp/qwen3_assets/Qwen3-32B"
+
+[optimizer]
+name = "AdamW"
+lr = 1e-5
+
+[lr_scheduler]
+warmup_steps = 5
+
+[training]
+local_batch_size = 1
+seq_len = 2048
+steps = 100
+dataset = "c4"
+dtype = "bfloat16"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = 1
+tensor_parallel_degree = 8
+
+[activation_checkpoint]
+mode = "full"
+
+[checkpoint]
+enable = false
+```
+
+### Results (8xH100, Qwen3-32B, TP=8, BS=1, seq=2048, BF16+autocast)
+
+PyTorch 2.9.0 Results (8xH100, Qwen3-32B, TP=8, BS=1, seq=2048, BF16+autocast)
+
+| Implementation   | Throughput        | Avg Step Time | Peak Memory |
+|------------------|-------------------|---------------|-------------|
+| DeepSpeed AutoTP | 2,479 tokens/sec  | 829 ms        | 49.2 GB     |
+| FSDP + DTensor   | 1,513 tokens/sec  | 1,354 ms      | 34.6 GB     |
+| TorchTitan       | ~1,000 tokens/sec | ~2,028 ms     | 32.8 GB     |
+
 ## Installation
 
 ### Dependencies
