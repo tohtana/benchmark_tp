@@ -94,8 +94,6 @@ torchrun --nproc_per_node=4 benchmark.py \
 | `--tp_size` | auto | Tensor parallel degree |
 | `--dp_size` | `1` | Data parallel degree (both implementations) |
 | `--zero_stage` | `1` | DeepSpeed ZeRO stage (AutoTP only, 0-2) |
-| `--use_vocab_parallel` | `true` | Enable vocabulary-parallel embeddings (AutoTP only) |
-| `--no_vocab_parallel` | - | Disable vocabulary-parallel embeddings (AutoTP only) |
 
 Both implementations require `dp_size * tp_size == world_size`.
 
@@ -271,18 +269,18 @@ For 8 GPUs with dp_size=2, tp_size=4:
 | DP mechanism | DeepSpeed engine with MPU | FSDP2 `fully_shard()` |
 | Optimizer | DeepSpeed ZeRO (stage 0-2) | PyTorch AdamW |
 | Memory optimization | ZeRO sharding | FSDP sharding |
-| Vocab parallelism | VocabParallelEmbedding | Not implemented |
+| Vocab parallelism | VocabParallelEmbedding | DTensor loss_parallel |
 | Autocast | DeepSpeed `torch_autocast` config | `torch.autocast()` context |
 
 ## Vocabulary Parallelism
 
-When `--use_vocab_parallel` is enabled (default for AutoTP), the implementation:
+Both implementations automatically partition vocabulary embeddings and lm_head for correct and efficient training.
+
+### AutoTP (Megatron-style)
 
 1. **Partitions embeddings** - Each TP rank stores `vocab_size / tp_size` embeddings
 2. **Shards lm_head** - Output projection weights are partitioned to match
 3. **Uses vocab-parallel loss** - Cross-entropy computed correctly over partitioned logits
-
-This is important because DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension by default. Without vocab parallelism, loss computation would be incorrect.
 
 ```
 Example: vocab_size=151936, tp_size=4
@@ -293,6 +291,14 @@ Example: vocab_size=151936, tp_size=4
 ```
 
 The `VocabParallelEmbedding` uses all-reduce to combine embedding outputs from all ranks, and `vocab_parallel_causal_cross_entropy` computes loss correctly when logits are split across ranks.
+
+### FSDP+DTensor (TorchTitan-style)
+
+1. **Embedding**: `RowwiseParallel` - embeddings sharded by hidden dimension
+2. **lm_head**: `ColwiseParallel` with `Shard(-1)` - logits sharded by vocabulary dimension
+3. **Loss**: `loss_parallel()` context handles cross-entropy with sharded logits
+
+This uses PyTorch's native DTensor infrastructure for automatic gradient handling.
 
 ## Architecture
 

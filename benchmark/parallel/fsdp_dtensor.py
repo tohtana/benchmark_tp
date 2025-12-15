@@ -122,6 +122,14 @@ class FSDPDTensorStrategy(BaseTPStrategy):
         for layer in layers:
             parallelize_module(layer, self.tp_mesh, tp_mapping)
 
+        # Step 1.5: Apply DTensor TP to embedding and lm_head for vocab parallelism
+        # Always use loss_parallel=True for efficient loss computation with sharded vocab
+        vocab_parallel_mapping = model_builder.get_vocab_parallel_mapping(loss_parallel=True)
+        parallelize_module(model, self.tp_mesh, vocab_parallel_mapping)
+
+        if self.rank == 0:
+            print(f"[FSDP2+DTensor] Applied vocab parallel TP to embedding and lm_head")
+
         # Step 2: Apply FSDP2 (fully_shard) to each transformer layer
         # FSDP2 is composable and works well with DTensor
         mp_policy = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
@@ -175,6 +183,7 @@ class FSDPDTensorStrategy(BaseTPStrategy):
             if self.use_autocast
             else nullcontext()
         )
+
         with autocast_ctx:
             outputs = self.model(
                 input_ids=batch["input_ids"],
@@ -187,6 +196,61 @@ class FSDPDTensorStrategy(BaseTPStrategy):
     def backward(self, loss: torch.Tensor) -> None:
         """Run backward pass."""
         loss.backward()
+
+    def forward_backward(
+        self, batch: Dict[str, torch.Tensor], loss_scale: float = 1.0
+    ) -> tuple:
+        """Run forward and backward passes together.
+
+        Both forward and backward must be wrapped in the same loss_parallel context
+        to ensure DTensor operations work correctly with sharded vocabulary dimension.
+
+        Args:
+            batch: Input batch dictionary
+            loss_scale: Scale factor for the loss (e.g., 1/gradient_accumulation_steps)
+
+        Returns:
+            Tuple of (loss, forward_time, backward_time) where times are in seconds
+        """
+        import time
+
+        from torch.distributed.tensor.parallel import loss_parallel
+
+        autocast_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.autocast_dtype)
+            if self.use_autocast
+            else nullcontext()
+        )
+
+        # loss_parallel context handles cross-entropy computation correctly when
+        # output logits are sharded across vocab dimension
+        # The context must wrap BOTH forward and backward together
+        with autocast_ctx, loss_parallel():
+            torch.cuda.synchronize()
+            forward_start = time.perf_counter()
+
+            outputs = self.model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+                use_cache=False,
+            )
+            loss = outputs.loss
+
+            torch.cuda.synchronize()
+            forward_time = time.perf_counter() - forward_start
+
+            scaled_loss = loss * loss_scale
+
+            torch.cuda.synchronize()
+            backward_start = time.perf_counter()
+
+            scaled_loss.backward()
+
+            torch.cuda.synchronize()
+            backward_time = time.perf_counter() - backward_start
+
+        return loss, forward_time, backward_time
 
     def optimizer_step(self) -> None:
         """Run optimizer step."""

@@ -33,12 +33,11 @@ class AutoTPStrategy(BaseTPStrategy):
     - DP groups: {0,4}, {1,5}, {2,6}, {3,7}
     """
 
-    def __init__(self, tp_size: Optional[int] = None, dp_size: int = 1, use_vocab_parallel: bool = True):
+    def __init__(self, tp_size: Optional[int] = None, dp_size: int = 1):
         super().__init__(tp_size, dp_size)
         self.engine = None
         self.tp_group = None
         self.dp_group = None
-        self.use_vocab_parallel = use_vocab_parallel
         self._model_builder = None
 
     @property
@@ -185,7 +184,7 @@ class AutoTPStrategy(BaseTPStrategy):
         # Apply vocabulary-parallel embedding for proper parallel loss computation
         # DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension,
         # so we replace them with VocabParallelEmbedding for correct loss computation
-        if self.use_vocab_parallel and self.tp_group is not None:
+        if self.tp_group is not None:
             self._apply_vocab_parallel_embedding(model, device, dtype)
 
         # Get all parameters
@@ -267,8 +266,6 @@ class AutoTPStrategy(BaseTPStrategy):
             print(f"[AutoTP] DeepSpeed engine created with ZeRO-{zero_stage}")
             if self.dp_size > 1:
                 print(f"[AutoTP] 2D parallelism: {self.dp_size} DP x {self.tp_size} TP")
-            if self.use_vocab_parallel:
-                print(f"[AutoTP] Vocabulary parallelism enabled")
 
     def _apply_vocab_parallel_embedding(
         self,
@@ -346,9 +343,9 @@ class AutoTPStrategy(BaseTPStrategy):
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Run forward pass with AutoTP model."""
-        # When using vocab parallel, we need to compute loss manually
-        # because the model's built-in loss uses the full vocabulary
-        if self.use_vocab_parallel and self.tp_group is not None:
+        # We use vocab-parallel loss computation because the model's built-in loss
+        # would use the full vocabulary while we have partitioned embeddings/lm_head
+        if self.tp_group is not None:
             outputs = self.engine(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
@@ -365,7 +362,7 @@ class AutoTPStrategy(BaseTPStrategy):
             )
             return loss
         else:
-            # Use model's built-in loss computation
+            # Single GPU case - use model's built-in loss computation
             outputs = self.engine(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],

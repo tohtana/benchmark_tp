@@ -44,17 +44,19 @@ def get_args():
         choices=[0, 1, 2],
         help="DeepSpeed ZeRO stage (only used for autotp, ZeRO-3 not supported with AutoTP)",
     )
+
+    # Dataset configuration
     parser.add_argument(
-        "--use_vocab_parallel",
-        action="store_true",
-        default=True,
-        help="Enable vocabulary-parallel embedding and loss computation (AutoTP only)",
+        "--dataset_name",
+        type=str,
+        default=None,
+        help="Dataset name for pretraining (e.g., 'wikitext', 'openwebtext'). If not specified, uses synthetic data.",
     )
     parser.add_argument(
-        "--no_vocab_parallel",
-        dest="use_vocab_parallel",
-        action="store_false",
-        help="Disable vocabulary-parallel embedding (AutoTP only)",
+        "--dataset_percentage",
+        type=float,
+        default=10.0,
+        help="Percentage of dataset to use (e.g., 10.0 for 10%%). Only used when --dataset_name is specified.",
     )
 
     # Training configuration

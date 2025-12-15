@@ -78,28 +78,15 @@ def training_loop(
         backward_time_total = 0.0
 
         # Gradient accumulation loop
+        loss_scale = 1.0 / gradient_accumulation_steps
         for micro_step in range(gradient_accumulation_steps):
-            # Forward pass timing
-            torch.cuda.synchronize()
-            forward_start = time.perf_counter()
+            # Use combined forward_backward for strategies that need it (e.g., DTensor loss_parallel)
+            # The method returns actual timing measurements for forward and backward
+            loss, forward_time, backward_time = strategy.forward_backward(
+                batch, loss_scale=loss_scale
+            )
 
-            loss = strategy.forward(batch)
-
-            # Scale loss for gradient accumulation
-            scaled_loss = loss / gradient_accumulation_steps
-
-            torch.cuda.synchronize()
-            forward_time = time.perf_counter() - forward_start
             forward_time_total += forward_time
-
-            # Backward pass timing
-            torch.cuda.synchronize()
-            backward_start = time.perf_counter()
-
-            strategy.backward(scaled_loss)
-
-            torch.cuda.synchronize()
-            backward_time = time.perf_counter() - backward_start
             backward_time_total += backward_time
 
             accumulated_loss += loss.item()
@@ -166,7 +153,6 @@ def main():
         print(f"World size: {world_size}")
         print(f"TP size: {args.tp_size or 'auto'}")
         print(f"DP size: {args.dp_size}")
-        print(f"Vocab parallel: {args.use_vocab_parallel}")
         print(f"Batch size: {args.batch_size}")
         print(f"Sequence length: {args.seq_length}")
         print(f"Training steps: {args.num_training_steps}")
@@ -175,6 +161,10 @@ def main():
         print(f"Data type: {args.dtype}")
         print(f"Autocast: {args.autocast}")
         print(f"Profiling: {args.profile}")
+        if args.dataset_name:
+            print(f"Dataset: {args.dataset_name} ({args.dataset_percentage}%)")
+        else:
+            print(f"Dataset: synthetic")
         print(f"=" * 60)
 
     # Set random seed for model initialization
@@ -208,7 +198,6 @@ def main():
         impl=args.impl,
         tp_size=args.tp_size,
         dp_size=args.dp_size,
-        use_vocab_parallel=args.use_vocab_parallel,
     )
 
     # Setup strategy (creates model and optimizer)
@@ -240,11 +229,25 @@ def main():
     # while different DP groups see different data
     dp_rank = getattr(strategy, 'dp_rank', 0) if hasattr(strategy, 'dp_rank') else 0
     data_seed = args.seed + dp_rank
+
+    if args.dataset_name:
+        if rank == 0:
+            print(f"Using real dataset: {args.dataset_name} ({args.dataset_percentage}%)")
+    else:
+        if rank == 0:
+            print("Using synthetic data")
+
     dataloader = create_dataloader(
         vocab_size=model_config.vocab_size,
         seq_length=args.seq_length,
         batch_size=args.batch_size,
         seed=data_seed,
+        dataset_name=args.dataset_name,
+        dataset_percentage=args.dataset_percentage,
+        model_name=args.model_name,
+        rank=dp_rank,
+        world_size=strategy.dp_size,
+        is_main_process=(rank == 0),
     )
 
     # Create metrics collector
@@ -254,7 +257,6 @@ def main():
         "impl": args.impl,
         "tp_size": strategy.tp_size,
         "dp_size": strategy.dp_size,
-        "use_vocab_parallel": args.use_vocab_parallel,
         "batch_size": args.batch_size,
         "seq_length": args.seq_length,
         "learning_rate": args.learning_rate,
@@ -265,6 +267,8 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "activation_checkpointing": args.activation_checkpointing,
         "world_size": world_size,
+        "dataset_name": args.dataset_name or "synthetic",
+        "dataset_percentage": args.dataset_percentage if args.dataset_name else None,
     })
 
     # Reset peak memory before training

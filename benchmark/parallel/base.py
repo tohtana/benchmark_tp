@@ -83,6 +83,47 @@ class BaseTPStrategy(ABC):
         """
         pass
 
+    def forward_backward(
+        self, batch: Dict[str, torch.Tensor], loss_scale: float = 1.0
+    ) -> tuple:
+        """
+        Run forward and backward passes together.
+
+        This method allows strategies to wrap both forward and backward
+        in a shared context (e.g., for loss_parallel in DTensor). The default
+        implementation calls forward() and backward() separately.
+
+        Override this method if the strategy requires both passes to be in the same context.
+
+        Args:
+            batch: Input batch dictionary
+            loss_scale: Scale factor for the loss (e.g., 1/gradient_accumulation_steps)
+
+        Returns:
+            Tuple of (loss, forward_time, backward_time) where times are in seconds
+        """
+        import time
+
+        torch.cuda.synchronize()
+        forward_start = time.perf_counter()
+
+        loss = self.forward(batch)
+
+        torch.cuda.synchronize()
+        forward_time = time.perf_counter() - forward_start
+
+        scaled_loss = loss * loss_scale
+
+        torch.cuda.synchronize()
+        backward_start = time.perf_counter()
+
+        self.backward(scaled_loss)
+
+        torch.cuda.synchronize()
+        backward_time = time.perf_counter() - backward_start
+
+        return loss, forward_time, backward_time
+
     @abstractmethod
     def optimizer_step(self) -> None:
         """Run optimizer step."""

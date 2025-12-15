@@ -124,6 +124,39 @@ class BaseModelBuilder(ABC):
             return model.lm_head
         raise AttributeError(f"Model {type(model)} does not have lm_head attribute")
 
+    def get_vocab_parallel_mapping(self, loss_parallel: bool = True) -> Dict[str, Any]:
+        """
+        Get tensor parallel mapping for embedding and lm_head layers with vocab parallelism.
+
+        When loss_parallel is enabled:
+        - Embedding: RowwiseParallel - input tokens replicated, output embeddings sharded by hidden dim
+        - lm_head: ColwiseParallel - output logits sharded by vocab dim for efficient loss computation
+
+        When loss_parallel is disabled:
+        - Embedding: RowwiseParallel - same as above
+        - lm_head: ColwiseParallel - output logits replicated across TP ranks
+
+        Args:
+            loss_parallel: Whether to enable loss parallel (shard output logits by vocab dim)
+
+        Returns:
+            Dictionary mapping layer names to parallelization strategies
+        """
+        from torch.distributed.tensor import Replicate, Shard
+        from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+
+        return {
+            "model.embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+            ),
+            "lm_head": ColwiseParallel(
+                input_layouts=Shard(1),
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        }
+
     @abstractmethod
     def replace_embedding_module(self, model: nn.Module, new_embedding: nn.Module) -> None:
         """
