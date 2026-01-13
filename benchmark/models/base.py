@@ -129,12 +129,18 @@ class BaseModelBuilder(ABC):
         Get tensor parallel mapping for embedding and lm_head layers with vocab parallelism.
 
         When loss_parallel is enabled:
-        - Embedding: RowwiseParallel - input tokens replicated, output embeddings sharded by hidden dim
+        - Embedding: RowwiseParallel - input tokens replicated, output embeddings replicated
+          (vocab dimension is sharded in weights, but output is all-reduced)
         - lm_head: ColwiseParallel - output logits sharded by vocab dim for efficient loss computation
 
         When loss_parallel is disabled:
         - Embedding: RowwiseParallel - same as above
         - lm_head: ColwiseParallel - output logits replicated across TP ranks
+
+        Note: This does NOT use Sequence Parallel. For SP, you would need:
+        - output_layouts=Shard(1) on embedding
+        - SequenceParallel() on all norm layers
+        - output_layouts=Shard(1) on RowwiseParallel layers (o_proj, down_proj)
 
         Args:
             loss_parallel: Whether to enable loss parallel (shard output logits by vocab dim)
@@ -148,10 +154,12 @@ class BaseModelBuilder(ABC):
         return {
             "model.embed_tokens": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),
+                # Note: Do NOT use output_layouts=Shard(1) here unless full Sequence Parallel
+                # is configured (SequenceParallel on norms, Shard(1) on o_proj/down_proj).
+                # Without full SP setup, Shard(1) causes incorrect sequence chunking in attention.
             ),
             "lm_head": ColwiseParallel(
-                input_layouts=Shard(1),
+                input_layouts=Replicate(),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
