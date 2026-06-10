@@ -245,13 +245,10 @@ class AutoTPStrategy(BaseTPStrategy):
         batch_size = config.get("batch_size", 1)
         gradient_accumulation_steps = config.get("gradient_accumulation_steps", 1)
 
-        # train_batch_size calculation:
-        # - TP peers consume the same microbatch.
-        # - DP replicas consume distinct microbatches.
-        # Keep this aligned with the explicit tensor_parallel config below.
-        effective_dp = self.dp_size if self.tp_size > 1 else self.world_size
+        # Omit train_batch_size so DeepSpeed derives the value that matches its
+        # world-size assertion when tensor_parallel config is used without MPU.
+        # The benchmark records the true DP batch semantics separately.
         ds_config = {
-            "train_batch_size": batch_size * effective_dp * gradient_accumulation_steps,
             "train_micro_batch_size_per_gpu": batch_size,
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "gradient_clipping": config.get("max_grad_norm", 1.0),
