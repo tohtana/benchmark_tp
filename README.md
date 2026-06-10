@@ -4,7 +4,7 @@ Benchmark and compare tensor parallelism implementations for large language mode
 
 ## Supported Implementations
 
-1. **DeepSpeed AutoTP** - Uses DeepSpeed's automatic tensor parallelism via `deepspeed.tp_model_init()` with vocabulary-parallel embeddings
+1. **DeepSpeed AutoTP** - Uses DeepSpeed's automatic tensor parallelism via `deepspeed.initialize()` `tensor_parallel` config with vocabulary-parallel embeddings
 2. **FSDP2 + DTensor** - Uses PyTorch's 2D device mesh with FSDP2 (`fully_shard`) for data parallelism and DTensor for tensor parallelism
 
 ## Benchmark Comparison with TorchTitan
@@ -226,6 +226,29 @@ Both implementations require `dp_size * tp_size == world_size`.
 | `--log_interval` | `10` | Logging interval |
 | `--output_dir` | `./results` | Output directory for results |
 | `--seed` | `42` | Random seed |
+
+### Memory Attribution
+
+Use `--phase_memory_profile` to write per-rank CUDA allocator snapshots at setup and first-step phases:
+
+```bash
+torchrun --nproc_per_node=8 benchmark.py \
+    --impl autotp \
+    --tp_size 8 \
+    --dp_size 1 \
+    --model_name Qwen/Qwen3-32B \
+    --batch_size 1 \
+    --seq_length 2048 \
+    --dtype bfloat16 \
+    --autocast \
+    --attn_impl sdpa \
+    --activation_checkpointing \
+    --phase_memory_profile \
+    --deepspeed_memory_breakdown \
+    --output_dir ./results/autotp-memory
+```
+
+Rank-local snapshots are saved as `{output_dir}/phase_memory_{impl}_tp{tp_size}_dp{dp_size}_rank{rank}.json`, and rank 0 also embeds its snapshots in the normal results JSON. For Qwen3 models, `--autotp_partition_config auto` supplies an explicit DeepSpeed `tensor_parallel.partition_config`; use `--autotp_partition_config none` to test default AutoTP partitioning or `--autotp_partition_config_file <path>` to provide a JSON object.
 
 ## Output Format
 

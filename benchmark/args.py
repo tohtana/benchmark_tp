@@ -29,13 +29,13 @@ def get_args():
         "--tp_size",
         type=int,
         default=None,
-        help="Tensor parallel degree (defaults to world_size for autotp, world_size/dp_size for fsdp_dtensor)",
+        help="Tensor parallel degree (defaults to world_size / dp_size)",
     )
     parser.add_argument(
         "--dp_size",
         type=int,
         default=1,
-        help="Data parallel degree (only used for fsdp_dtensor)",
+        help="Data parallel degree (both implementations)",
     )
     parser.add_argument(
         "--zero_stage",
@@ -161,6 +161,40 @@ def get_args():
         default="flash_attention_2",
         choices=["sdpa", "flash_attention_2", "eager"],
         help="Attention implementation",
+    )
+    parser.add_argument(
+        "--phase_memory_profile",
+        action="store_true",
+        help="Write rank-local phase CUDA memory snapshots for setup and first-step attribution",
+    )
+    parser.add_argument(
+        "--deepspeed_memory_breakdown",
+        action="store_true",
+        help="Enable DeepSpeed memory_breakdown in the AutoTP DeepSpeed config",
+    )
+    parser.add_argument(
+        "--autotp_partition_config",
+        choices=["auto", "none", "qwen3"],
+        default="auto",
+        help="DeepSpeed AutoTP partition config preset to use",
+    )
+    parser.add_argument(
+        "--autotp_partition_config_file",
+        type=str,
+        default=None,
+        help="Path to a DeepSpeed tensor_parallel.partition_config JSON object",
+    )
+    parser.add_argument(
+        "--autotp_bf16_master_weights_and_grads",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable pure-BF16 master weights/grads on the AutoTP DeepSpeed side",
+    )
+    parser.add_argument(
+        "--autotp_bf16_optimizer_states",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable pure-BF16 optimizer states on the AutoTP DeepSpeed side",
     )
 
     # Profiling configuration

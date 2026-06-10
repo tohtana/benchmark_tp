@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import json
 import time
 from contextlib import nullcontext
 
@@ -99,6 +100,8 @@ def training_loop(
 
         torch.cuda.synchronize()
         optimizer_time = time.perf_counter() - optimizer_start
+        if step == 0:
+            strategy.record_memory_phase("after_first_optimizer_step", {"step": step})
 
         step_time = time.perf_counter() - step_start
 
@@ -113,6 +116,10 @@ def training_loop(
                 forward_time_s=forward_time_total,
                 backward_time_s=backward_time_total,
                 optimizer_time_s=optimizer_time,
+            )
+            strategy.record_memory_phase(
+                "steady_state_measured_step",
+                {"step": step, "is_warmup": is_warmup},
             )
 
         # Logging
@@ -199,6 +206,7 @@ def main():
         tp_size=args.tp_size,
         dp_size=args.dp_size,
     )
+    strategy.profile_phase_memory = args.phase_memory_profile
 
     # Setup strategy (creates model and optimizer)
     config = {
@@ -212,11 +220,22 @@ def main():
         "num_layers": args.num_layers,
         "attn_impl": args.attn_impl,
         "autocast": args.autocast,
+        "phase_memory_profile": args.phase_memory_profile,
+        "deepspeed_memory_breakdown": args.deepspeed_memory_breakdown,
+        "autotp_partition_config": args.autotp_partition_config,
+        "autotp_partition_config_file": args.autotp_partition_config_file,
+        "autotp_bf16_master_weights_and_grads": args.autotp_bf16_master_weights_and_grads,
+        "autotp_bf16_optimizer_states": args.autotp_bf16_optimizer_states,
     }
 
     if rank == 0:
         print(f"Setting up {strategy.strategy_name}...")
 
+    strategy.device = device
+    strategy.rank = rank
+    strategy.world_size = world_size
+    torch.cuda.reset_peak_memory_stats()
+    strategy.record_memory_phase("before_model_creation")
     strategy.setup(model_builder, device, dtype, config)
 
     if rank == 0:
@@ -269,6 +288,12 @@ def main():
         "world_size": world_size,
         "dataset_name": args.dataset_name or "synthetic",
         "dataset_percentage": args.dataset_percentage if args.dataset_name else None,
+        "phase_memory_profile": args.phase_memory_profile,
+        "deepspeed_memory_breakdown": args.deepspeed_memory_breakdown,
+        "autotp_partition_config": args.autotp_partition_config,
+        "autotp_partition_config_file": args.autotp_partition_config_file,
+        "autotp_bf16_master_weights_and_grads": args.autotp_bf16_master_weights_and_grads,
+        "autotp_bf16_optimizer_states": args.autotp_bf16_optimizer_states,
     })
 
     # Reset peak memory before training
@@ -322,8 +347,31 @@ def main():
             profiler=profiler,
         )
 
+    if args.phase_memory_profile:
+        os.makedirs(args.output_dir, exist_ok=True)
+        phase_path = os.path.join(
+            args.output_dir,
+            f"phase_memory_{args.impl}_tp{strategy.tp_size}_dp{strategy.dp_size}_rank{rank}.json",
+        )
+        with open(phase_path, "w") as f:
+            json.dump(
+                {
+                    "rank": rank,
+                    "world_size": world_size,
+                    "impl": args.impl,
+                    "tp_size": strategy.tp_size,
+                    "dp_size": strategy.dp_size,
+                    "snapshots": strategy.memory_snapshots,
+                },
+                f,
+                indent=2,
+            )
+        if rank == 0:
+            print(f"Rank-local phase memory saved to: {phase_path}")
+
     # Print and save results
     if rank == 0:
+        metrics_collector.set_phase_memory_snapshots(strategy.memory_snapshots)
         metrics_collector.print_summary()
 
         # Save results
