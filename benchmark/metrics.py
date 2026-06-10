@@ -43,6 +43,7 @@ class MetricsCollector:
         self.batch_size = batch_size
         self.steps: List[StepMetrics] = []
         self.config: Dict = {}
+        self.phase_memory_snapshots: List[Dict] = []
 
     def set_config(self, config: Dict) -> None:
         """
@@ -52,6 +53,10 @@ class MetricsCollector:
             config: Configuration dictionary
         """
         self.config = config
+
+    def set_phase_memory_snapshots(self, snapshots: List[Dict]) -> None:
+        """Store rank-local phase memory snapshots."""
+        self.phase_memory_snapshots = snapshots
 
     def record_step(
         self,
@@ -158,6 +163,7 @@ class MetricsCollector:
             "config": self.config,
             "steps": [asdict(s) for s in self.steps],
             "summary": self.get_summary(),
+            "phase_memory_snapshots": self.phase_memory_snapshots,
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)

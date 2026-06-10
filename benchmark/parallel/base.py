@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
+import time
 
 import torch
 import torch.nn as nn
@@ -32,6 +33,8 @@ class BaseTPStrategy(ABC):
         self.rank: int = 0
         self.world_size: int = 1
         self.device: Optional[torch.device] = None
+        self.profile_phase_memory: bool = False
+        self.memory_snapshots: list[dict[str, Any]] = []
 
     @property
     @abstractmethod
@@ -111,6 +114,7 @@ class BaseTPStrategy(ABC):
 
         torch.cuda.synchronize()
         forward_time = time.perf_counter() - forward_start
+        self.record_memory_phase_once("after_first_forward")
 
         scaled_loss = loss * loss_scale
 
@@ -121,6 +125,7 @@ class BaseTPStrategy(ABC):
 
         torch.cuda.synchronize()
         backward_time = time.perf_counter() - backward_start
+        self.record_memory_phase_once("after_first_backward")
 
         return loss, forward_time, backward_time
 
@@ -155,3 +160,44 @@ class BaseTPStrategy(ABC):
         if self.model is None:
             return 0
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+    def record_memory_phase(
+        self,
+        phase: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a rank-local CUDA allocator snapshot for attribution."""
+        if not self.profile_phase_memory or self.device is None:
+            return
+        if not torch.cuda.is_available():
+            return
+
+        torch.cuda.synchronize(self.device)
+        snapshot: Dict[str, Any] = {
+            "phase": phase,
+            "timestamp_s": time.time(),
+            "rank": int(self.rank),
+            "world_size": int(self.world_size),
+            "device": str(self.device),
+            "memory_allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+            "memory_reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+            "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(self.device)),
+            "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(self.device)),
+        }
+        if hasattr(self, "tp_rank"):
+            snapshot["tp_rank"] = int(getattr(self, "tp_rank"))
+        if hasattr(self, "dp_rank"):
+            snapshot["dp_rank"] = int(getattr(self, "dp_rank"))
+        if extra:
+            snapshot.update(extra)
+        self.memory_snapshots.append(snapshot)
+
+    def record_memory_phase_once(
+        self,
+        phase: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a phase snapshot only the first time that phase is reached."""
+        if any(snapshot.get("phase") == phase for snapshot in self.memory_snapshots):
+            return
+        self.record_memory_phase(phase, extra)

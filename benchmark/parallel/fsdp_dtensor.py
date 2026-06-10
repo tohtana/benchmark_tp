@@ -105,6 +105,8 @@ class FSDPDTensorStrategy(BaseTPStrategy):
             num_layers=config.get("num_layers", 0),
             attn_impl=config.get("attn_impl", "sdpa"),
         )
+        self.model = model
+        self.record_memory_phase("after_model_creation")
 
         # Apply activation checkpointing if requested
         if config.get("activation_checkpointing", False):
@@ -126,6 +128,7 @@ class FSDPDTensorStrategy(BaseTPStrategy):
         # Always use loss_parallel=True for efficient loss computation with sharded vocab
         vocab_parallel_mapping = model_builder.get_vocab_parallel_mapping(loss_parallel=True)
         parallelize_module(model, self.tp_mesh, vocab_parallel_mapping)
+        self.record_memory_phase("after_dtensor_parallelization")
 
         if self.rank == 0:
             print(f"[FSDP2+DTensor] Applied vocab parallel TP to embedding and lm_head")
@@ -143,9 +146,11 @@ class FSDPDTensorStrategy(BaseTPStrategy):
 
             # Apply to the whole model
             fully_shard(model, mesh=self.dp_mesh, mp_policy=mp_policy)
+            self.record_memory_phase("after_fsdp_initialization")
         else:
             if self.rank == 0:
                 print("[FSDP2+DTensor] dp_size=1, skipping FSDP sharding (TP only)")
+            self.record_memory_phase("after_fsdp_initialization")
 
         self.model = model
 
@@ -163,6 +168,7 @@ class FSDPDTensorStrategy(BaseTPStrategy):
             weight_decay=weight_decay,
             foreach=False,  # Required for DTensor compatibility
         )
+        self.record_memory_phase("after_optimizer_setup")
 
         if self.rank == 0:
             num_params = sum(p.numel() for p in model.parameters())
@@ -239,6 +245,7 @@ class FSDPDTensorStrategy(BaseTPStrategy):
 
             torch.cuda.synchronize()
             forward_time = time.perf_counter() - forward_start
+            self.record_memory_phase_once("after_first_forward")
 
             scaled_loss = loss * loss_scale
 
@@ -249,6 +256,7 @@ class FSDPDTensorStrategy(BaseTPStrategy):
 
             torch.cuda.synchronize()
             backward_time = time.perf_counter() - backward_start
+            self.record_memory_phase_once("after_first_backward")
 
         return loss, forward_time, backward_time
 

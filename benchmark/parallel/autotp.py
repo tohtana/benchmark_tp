@@ -1,5 +1,6 @@
 """DeepSpeed AutoTP tensor parallelism strategy."""
 
+import json
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -20,7 +21,7 @@ class AutoTPStrategy(BaseTPStrategy):
 
     Uses DeepSpeed's automatic tensor parallelism via:
     - set_autotp_mode() for instrumentation
-    - deepspeed.tp_model_init() for automatic model sharding
+    - tensor_parallel config in deepspeed.initialize()
     - DeepSpeed engine for training with ZeRO optimization
 
     When dp_size > 1, creates a 2D parallelism configuration:
@@ -39,6 +40,59 @@ class AutoTPStrategy(BaseTPStrategy):
         self.tp_group = None
         self.dp_group = None
         self._model_builder = None
+
+    @staticmethod
+    def _qwen3_partition_config() -> Dict[str, Any]:
+        return {
+            "use_default_specs": False,
+            "strict_mode": False,
+            "layer_specs": [
+                {
+                    "patterns": [
+                        r".*\.self_attn\.o_proj\.weight$",
+                        r".*\.mlp\.down_proj\.weight$",
+                    ],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [
+                        r".*\.self_attn\.[qkv]_proj\.weight$",
+                        r".*\.mlp\.(up|gate)_proj\.weight$",
+                    ],
+                    "partition_type": "column",
+                },
+            ],
+        }
+
+    @staticmethod
+    def _load_partition_config(path: str) -> Dict[str, Any]:
+        with open(path) as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError("AutoTP partition config file must contain a JSON object")
+        return payload
+
+    def _resolve_partition_config(
+        self,
+        model_config: Any,
+        config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        config_file = config.get("autotp_partition_config_file")
+        if config_file:
+            return self._load_partition_config(str(config_file))
+
+        preset = config.get("autotp_partition_config", "auto")
+        if preset == "none":
+            return None
+        if preset == "qwen3":
+            return self._qwen3_partition_config()
+        if preset == "auto":
+            model_type = str(getattr(model_config, "model_type", "") or "").lower()
+            model_name = str(getattr(model_config, "_name_or_path", "") or "").lower()
+            if "qwen3" in model_type or "qwen3" in model_name:
+                return self._qwen3_partition_config()
+            return None
+        raise ValueError(f"Unsupported AutoTP partition config preset: {preset}")
 
     @property
     def strategy_name(self) -> str:
@@ -165,6 +219,8 @@ class AutoTPStrategy(BaseTPStrategy):
             num_layers=config.get("num_layers", 0),
             attn_impl=config.get("attn_impl", "sdpa"),
         )
+        self.model = model
+        self.record_memory_phase("after_model_creation")
 
         # Apply activation checkpointing if requested
         if config.get("activation_checkpointing", False):
@@ -172,20 +228,12 @@ class AutoTPStrategy(BaseTPStrategy):
             if self.rank == 0:
                 print("[AutoTP] Enabled activation checkpointing")
 
-        # Apply TP sharding with deepspeed.tp_model_init()
-        # Pass the TP group so DeepSpeed knows which ranks share model shards
-        model = deepspeed.tp_model_init(
-            model,
-            tp_size=self.tp_size,
-            dtype=dtype,
-            tp_group=self.tp_group,
-        )
-
         # Apply vocabulary-parallel embedding for proper parallel loss computation
         # DeepSpeed AutoTP doesn't partition embeddings/lm_head by vocabulary dimension,
         # so we replace them with VocabParallelEmbedding for correct loss computation
         if self.tp_group is not None:
             self._apply_vocab_parallel_embedding(model, device, dtype)
+        self.record_memory_phase("after_vocab_parallel_setup")
 
         # Get all parameters
         params = list(model.parameters())
@@ -198,9 +246,9 @@ class AutoTPStrategy(BaseTPStrategy):
         gradient_accumulation_steps = config.get("gradient_accumulation_steps", 1)
 
         # train_batch_size calculation:
-        # - When MPU is provided (tp_size > 1): DeepSpeed uses mpu.get_data_parallel_world_size()
-        # - When MPU is not provided: DeepSpeed uses world_size
-        # This must match the condition for passing MPU to deepspeed.initialize()
+        # - TP peers consume the same microbatch.
+        # - DP replicas consume distinct microbatches.
+        # Keep this aligned with the explicit tensor_parallel config below.
         effective_dp = self.dp_size if self.tp_size > 1 else self.world_size
         ds_config = {
             "train_batch_size": batch_size * effective_dp * gradient_accumulation_steps,
@@ -213,19 +261,31 @@ class AutoTPStrategy(BaseTPStrategy):
             },
             "tensor_parallel": {
                 "autotp_size": self.tp_size,
+                "tp": {"tp_size": self.tp_size},
             },
             "data_parallel_size": self.dp_size,
             "zero_allow_untested_optimizer": True,
             "steps_per_print": 2000,
             "wall_clock_breakdown": False,
         }
+        partition_config = self._resolve_partition_config(model_config, config)
+        if partition_config is not None:
+            ds_config["tensor_parallel"]["partition_config"] = partition_config
+            if self.rank == 0:
+                print("[AutoTP] Using explicit tensor_parallel.partition_config")
+        if config.get("deepspeed_memory_breakdown", False):
+            ds_config["memory_breakdown"] = True
 
         # Add precision config
         if dtype == torch.bfloat16:
             ds_config["bf16"] = {
                 "enabled": True,
-                "bf16_master_weights_and_grads": True,
-                "bf16_optimizer_states": True,
+                "bf16_master_weights_and_grads": config.get(
+                    "autotp_bf16_master_weights_and_grads", True
+                ),
+                "bf16_optimizer_states": config.get(
+                    "autotp_bf16_optimizer_states", True
+                ),
             }
         elif dtype == torch.float16:
             ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
@@ -247,16 +307,16 @@ class AutoTPStrategy(BaseTPStrategy):
         optimizer = torch.optim.AdamW(
             params, lr=learning_rate, weight_decay=weight_decay
         )
+        self.record_memory_phase("after_optimizer_setup")
 
         # Initialize DeepSpeed engine
-        # Pass the MPU so DeepSpeed knows the parallelism topology and does gradient
-        # all-reduce only across DP ranks (not across TP ranks)
         self.engine, self.optimizer, _, _ = deepspeed.initialize(
             model=model,
             optimizer=optimizer,
             config=ds_config,
-            mpu=self._create_mpu() if self.tp_size > 1 else None,
         )
+        self.record_memory_phase("after_autotp_parallelization")
+        self.record_memory_phase("after_deepspeed_initialization")
 
         self.model = self.engine.module
 
